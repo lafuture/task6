@@ -76,9 +76,6 @@ func (h *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				defer rows.Close()
 
 				WriteRows(w, rows)
-			} else {
-				http.Error(w, "unknown table", http.StatusBadRequest)
-				return
 			}
 
 		case 2:
@@ -178,10 +175,12 @@ func (h *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
-			} else {
-				http.Error(w, "unknown table", http.StatusBadRequest)
 			}
+			w.WriteHeader(http.StatusOK)
+		} else {
+			http.Error(w, "unknown table", http.StatusBadRequest)
 		}
+
 	}
 
 }
