@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -15,15 +16,70 @@ type DbExplorer struct {
 	db *sql.DB
 }
 
-func WriteRows(w http.ResponseWriter, rows *sql.Rows) error {
+func WriteTables(w http.ResponseWriter, rows *sql.Rows) {
+	resp := []string{}
 	for rows.Next() {
-		var id int
-		var title, description, updated string
-		rows.Scan(&id, &title, &description, &updated)
-		fmt.Fprintf(w, "%d%s%s%s\n", id, title, description, updated)
+		var tableName string
+		if err := rows.Scan(&tableName); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		resp = append(resp, tableName)
 	}
 
-	return rows.Err()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"response": map[string]interface{}{
+			"tables": resp,
+		},
+	})
+}
+
+func WriteRows(w http.ResponseWriter, rows *sql.Rows) {
+	resp := []map[string]interface{}{}
+	for rows.Next() {
+		var id int
+		var title, description string
+		var updated *string
+		if err := rows.Scan(&id, &title, &description, &updated); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp = append(resp, map[string]interface{}{"id": id, "title": title, "description": description, "updated": updated})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"response": map[string]interface{}{
+			"records": resp,
+		},
+	})
+}
+
+func (h *DbExplorer) TableExists(table string) bool {
+	rows, err := h.db.Query("SHOW TABLES")
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var tableName string
+		if err := rows.Scan(&tableName); err != nil {
+			continue
+		}
+		if tableName == table {
+			return true
+		}
+	}
+	return false
+}
+
+func SendError(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": "unknown table",
+	})
 }
 
 func (h *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -37,45 +93,26 @@ func (h *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			rows, err := h.db.Query("SHOW TABLES")
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
 			}
 			defer rows.Close()
 
-			WriteRows(w, rows)
+			WriteTables(w, rows)
 		case 1:
 			limitInt, _ := strconv.Atoi(query.Get("limit"))
 			offsetInt, _ := strconv.Atoi(query.Get("offset"))
 			table := path[0]
 
-			flag := false
-			allrows, err := h.db.Query("SHOW TABLES")
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			defer allrows.Close()
-			for allrows.Next() {
-				var tableName string
-				err := allrows.Scan(&tableName)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-				}
-				if tableName == table {
-					flag = true
-					break
-				}
-			}
-
-			if flag {
+			if h.TableExists(table) {
 				s := fmt.Sprintf("SELECT * FROM %s LIMIT ? OFFSET ?", table)
 				rows, err := h.db.Query(s, limitInt, offsetInt)
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
 				}
 				defer rows.Close()
 
 				WriteRows(w, rows)
+			} else {
+				SendError(w)
 			}
 
 		case 2:
@@ -84,105 +121,95 @@ func (h *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			table := path[0]
 			id := path[1]
 
-			flag := false
-			allrows, err := h.db.Query("SHOW TABLES")
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			defer allrows.Close()
-			for allrows.Next() {
-				var tableName string
-				err := allrows.Scan(&tableName)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-				}
-				if tableName == table {
-					flag = true
-					break
-				}
-			}
-
-			if flag {
+			if h.TableExists(table) {
 				s := fmt.Sprintf("SELECT * FROM %s WHERE id=? LIMIT ? OFFSET ?", table)
 				rows, err := h.db.Query(s, id, limitInt, offsetInt)
 
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
 				}
 				defer rows.Close()
 
 				WriteRows(w, rows)
 			} else {
-				http.Error(w, "unknown table", http.StatusBadRequest)
+				SendError(w)
 			}
 
 		}
 	case "PUT":
 		r.ParseForm()
-		title := r.Form.Get("title")
-		description := r.Form.Get("description")
-		updated := r.Form.Get("updated")
 		table := path[0]
 
-		s := fmt.Sprintf("INSERT INTO %s(title, description, updated) VALUES(?, ?, ?)", table)
-		_, err := h.db.Exec(s, title, description, updated)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		if h.TableExists(table) {
+			title := r.Form.Get("title")
+			description := r.Form.Get("description")
+			updated := r.Form.Get("updated")
+			s := fmt.Sprintf("INSERT INTO %s(title, description, updated) VALUES(?, ?, ?)", table)
+			res, err := h.db.Exec(s, title, description, updated)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+
+			lastID, _ := res.LastInsertId()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"response": map[string]interface{}{
+					"id": lastID,
+				},
+			})
+		} else {
+			SendError(w)
 		}
 	case "POST":
 		r.ParseForm()
-		title := r.Form.Get("title")
-		description := r.Form.Get("description")
-		updated := r.Form.Get("updated")
 		table := path[0]
 		id := path[1]
 
-		s := fmt.Sprintf("UPDATE %s SET title = ?, description = ?, updated = ? WHERE id = ?", table)
-		_, err := h.db.Exec(s, title, description, updated, id)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		if h.TableExists(table) {
+			title := r.Form.Get("title")
+			description := r.Form.Get("description")
+			updated := r.Form.Get("updated")
+			s := fmt.Sprintf("UPDATE %s SET title = ?, description = ?, updated = ? WHERE id = ?", table)
+			res, err := h.db.Exec(s, title, description, updated, id)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+
+			affected, _ := res.RowsAffected()
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"response": map[string]interface{}{
+					"updated": affected,
+				},
+			})
+		} else {
+			SendError(w)
 		}
+
 	case "DELETE":
 		table := path[0]
 		id := path[1]
 
-		flag := false
-		allrows, err := h.db.Query("SHOW TABLES")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer allrows.Close()
-		for allrows.Next() {
-			var tableName string
-			err := allrows.Scan(&tableName)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
-			if tableName == table {
-				flag = true
-				break
-			}
-		}
-
-		if flag {
+		if h.TableExists(table) {
 			s := fmt.Sprintf("DELETE FROM %s WHERE id = ?", table)
-			_, err := h.db.Exec(s, id)
+			res, err := h.db.Exec(s, id)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
 			}
-			w.WriteHeader(http.StatusOK)
+
+			deleted, _ := res.RowsAffected()
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"response": map[string]interface{}{
+					"deleted": deleted,
+				},
+			})
 		} else {
-			http.Error(w, "unknown table", http.StatusBadRequest)
+			SendError(w)
 		}
-
 	}
-
 }
 
 func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
@@ -191,90 +218,3 @@ func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
 	}
 	return &DbExplorer{db: db}, nil
 }
-
-//func (h *DbExplorer) CaseGet(w http.ResponseWriter, path []string, query url.Values) {
-//	switch len(path) {
-//	case 0:
-//		rows, err := h.db.Query("SHOW TABLES")
-//		if err != nil {
-//			http.Error(w, err.Error(), http.StatusInternalServerError)
-//			return
-//		}
-//		defer rows.Close()
-//
-//		WriteRows(w, rows)
-//	case 1:
-//		limitInt, _ := strconv.Atoi(query.Get("limit"))
-//		offsetInt, _ := strconv.Atoi(query.Get("offset"))
-//		table := path[0]
-//
-//		s := fmt.Sprintf("SELECT * FROM %s LIMIT ? OFFSET ?", table)
-//		rows, err := h.db.Query(s, limitInt, offsetInt)
-//		if err != nil {
-//			http.Error(w, err.Error(), http.StatusInternalServerError)
-//			return
-//		}
-//		defer rows.Close()
-//
-//		WriteRows(w, rows)
-//	case 2:
-//		limitInt, _ := strconv.Atoi(query.Get("limit"))
-//		offsetInt, _ := strconv.Atoi(query.Get("offset"))
-//		table := path[0]
-//		id := path[1]
-//
-//		s := fmt.Sprintf("SELECT * FROM %s WHERE id=? LIMIT ? OFFSET ?", table)
-//		rows, err := h.db.Query(s, id, limitInt, offsetInt)
-//
-//		if err != nil {
-//			http.Error(w, err.Error(), http.StatusInternalServerError)
-//			return
-//		}
-//		defer rows.Close()
-//
-//		WriteRows(w, rows)
-//	}
-//}
-//
-//func (h *DbExplorer) CasePut(w http.ResponseWriter, r *http.Request, path []string) {
-//	r.ParseForm()
-//	title := r.Form.Get("title")
-//	description := r.Form.Get("description")
-//	updated := r.Form.Get("updated")
-//	table := path[0]
-//
-//	s := fmt.Sprintf("INSERT INTO %s(title, description, updated) VALUES(?, ?, ?)", table)
-//	_, err := h.db.Exec(s, title, description, updated)
-//	if err != nil {
-//		http.Error(w, err.Error(), http.StatusInternalServerError)
-//		return
-//	}
-//}
-//
-//func (h *DbExplorer) CasePost(w http.ResponseWriter, r *http.Request, path []string) {
-//	r.ParseForm()
-//	title := r.Form.Get("title")
-//	description := r.Form.Get("description")
-//	updated := r.Form.Get("updated")
-//	table := path[0]
-//	id := path[1]
-//
-//	s := fmt.Sprintf("UPDATE %s SET title = ?, description = ?, updated = ? WHERE id = ?", table)
-//	_, err := h.db.Exec(s, title, description, updated, id)
-//	if err != nil {
-//		http.Error(w, err.Error(), http.StatusInternalServerError)
-//		return
-//	}
-//}
-//
-//func (h *DbExplorer) CaseDelete(w http.ResponseWriter, r *http.Request, path []string) {
-//	table := path[0]
-//	id := path[1]
-//
-//	s := fmt.Sprintf("DELETE FROM %s WHERE id = ?", table)
-//	_, err := h.db.Exec(s, id)
-//	if err != nil {
-//		http.Error(w, err.Error(), http.StatusInternalServerError)
-//		return
-//	}
-//}
