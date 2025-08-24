@@ -15,4 +15,4 @@ services:
       MYSQL_ROOT_PASSWORD: "love"
       MYSQL_DATABASE: photolist
     volumes:
-      - './_mysql/:/docker-entrypoint-initdb.d/'
+      - './mysql/:/docker-entrypoint-initdb.d/'
