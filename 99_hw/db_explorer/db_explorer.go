@@ -135,7 +135,6 @@ func DecodePut(w http.ResponseWriter, r *http.Request) (interface{}, interface{}
 	}
 
 	var title, description, updated interface{}
-
 	if v, ok := body["title"]; ok {
 		title = v
 	}
@@ -153,27 +152,66 @@ func (h *DbExplorer) DecodePost(w http.ResponseWriter, r *http.Request, table, i
 	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return nil, nil, nil
 	}
 
 	row := h.db.QueryRow(fmt.Sprintf("SELECT title, description, updated FROM %s WHERE id=?", table), id)
 	var oldtitle, olddescription, oldupdated sql.NullString
 	if err := row.Scan(&oldtitle, &olddescription, &oldupdated); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return nil, nil, nil
 	}
 	title, description := oldtitle.String, olddescription.String
 	var updated interface{}
 
-	if v, ok := body["title"].(string); ok {
-		title = v
+	if _, ok := body["id"]; ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "field id have invalid type",
+		})
+		return nil, nil, nil
 	}
-	if v, ok := body["description"].(string); ok {
-		description = v
+	if v, ok := body["title"]; ok {
+		if s, ok := v.(string); ok {
+			title = s
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "field title have invalid type",
+			})
+			return nil, nil, nil
+		}
+	}
+	if v, ok := body["description"]; ok {
+		if s, ok := v.(string); ok {
+			description = s
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "field description have invalid type",
+			})
+			return nil, nil, nil
+		}
 	}
 	if v, ok := body["updated"]; ok {
-		if s, ok := v.(string); ok && s == "" {
+		if v == nil {
 			updated = nil
+		} else if s, ok := v.(string); ok {
+			if s == "" {
+				updated = nil
+			} else {
+				updated = s
+			}
 		} else {
-			updated = v
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "field updated have invalid type",
+			})
+			return nil, nil, nil
 		}
 	}
 
@@ -293,6 +331,10 @@ func (h *DbExplorer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		title, description, updated := h.DecodePost(w, r, table, id)
+		if title == nil && description == nil && updated == nil {
+			// была ошибка, уже отправлен JSON
+			return
+		}
 
 		s := fmt.Sprintf("UPDATE %s SET title = ?, description = ?, updated = ? WHERE id = ?", table)
 		res, err := h.db.Exec(s, title, description, updated, id)
